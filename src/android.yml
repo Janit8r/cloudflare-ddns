@@ -1,0 +1,194 @@
+name: Android Build
+
+# -------------------------------------------------------------------------------
+# 自动交叉编译 cloudflare-ddns 的 Android 版本 (Rust binary crate)。
+#
+# 关键决策（踩坑记录）：
+#   1) 项目用 rustls + ring（无 OpenSSL C 依赖），交叉编译仅需正确的 NDK 工具链。
+#   2) 第一版手动设置 CC_*/CARGO_TARGET_*_LINKER 环境变量，但 ring 的 cc-rs 构建脚本
+#      按旧式命名探测 "arm-linux-androideabi-clang"（NDK r27 实际为
+#      "armv7a-linux-androideabi<api>-clang"），armeabi-v7a 构建失败。
+#   3) 第二版改用 cargo-ndk，编译能通过，但收尾报
+#      "No usable artifacts produced by cargo ... cdylib?" 退出 1 —— cargo-ndk 只复制
+#      cdylib 产物，而本项目是纯 bin 守护进程（无 cdylib），故永远不可用。
+#   4) 第三版改用 .cargo/config.toml 的 [target.<triple>.env] 注入 CC —— 但 Cargo 根本
+#      不支持 [target.<triple>.env]，该段被静默忽略，CC 仍为空，ring 再次回退探测
+#      arm-linux-androideabi-clang 而失败。
+#   5) 最终方案（本文件）：复刻 cargo-ndk 真正起作用的机制 —— 把每个 Android target 的
+#      linker / CC / CXX / AR 作为【真实环境变量】，用 `env VAR=val ... cargo build`
+#      注入（注意：bash 的 export 不支持连字符变量名 CC_armv7-linux-androideabi，必须用
+#      env 或 GitHub 的 $GITHUB_ENV，二者都走 OS 级 setenv）。变量名用 Rust target triple
+#      （armv7-linux-androideabi），值指向 NDK 包装脚本（armv7a-linux-androideabi<api>-clang），
+#      差异在此对齐。最后由我们手动拷贝产物。
+#
+# 运行环境：
+#   默认 runs-on: ubuntu-latest（x86_64 官方托管机），可运行标准 x86_64 NDK 并交叉编译
+#   Android ARM / x86 产物，这是最稳妥的方案。
+#   若需在你描述的 armv8l (32 位 ARM) 自托管 Runner 上运行：官方 NDK 没有 32 位 ARM 宿主
+#   包，x86_64 版 NDK 无法在 armv8l 上执行。请改用官方 ubuntu-latest，或若自托管机实际为
+#   64 位 ARM(aarch64)，把 NDK 下载包换成 linux-aarch64 版（NDK r25+）并改 prebuilt 目录为
+#   linux-aarch64。你描述的 armv8l 目标设备对应下方 armeabi-v7a 产物。
+#
+# 目标架构映射：
+#   - aarch64-linux-android  → arm64-v8a     （64 位 ARM）
+#   - armv7-linux-androideabi → armeabi-v7a   （32 位 ARM；NDK clang 前缀是 armv7a-...）
+#   - i686-linux-android      → x86           （32 位 x86；NDK r27 仍支持该 ABI，ring 0.17
+#                                               的 Android 平台支持含 OPENSSL_X86，可编译）
+#   注: 你给的内核信息用于判断目标设备架构。i686 设备（内核 3.10.0 的老机器）对应 x86；
+#       NDK r25+ 最低 API 为 21，若设备系统低于 Android 5.0(API 21)，API 24 产物可能
+#       因缺少 bionic 符号而无法运行，遇此情况需下调 ANDROID_API 或换旧版 NDK。
+# -------------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 供 softprops/action-gh-release 创建 Release 使用
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  NDK_VERSION: r27c
+  ANDROID_API: "24"
+
+jobs:
+  android:
+    name: Build Android (arm64-v8a + armeabi-v7a + x86)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain (with Android targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android
+
+      - name: Cache Android NDK
+        id: ndk
+        uses: actions/cache@v4
+        with:
+          path: android-ndk-${{ env.NDK_VERSION }}
+          key: ndk-${{ env.NDK_VERSION }}
+
+      - name: Download Android NDK
+        if: steps.ndk.outputs.cache-hit != 'true'
+        run: |
+          curl -fSL -o ndk.zip "https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip"
+          unzip -q ndk.zip
+          rm -f ndk.zip
+
+      - name: Export ANDROID_NDK_HOME
+        run: echo "ANDROID_NDK_HOME=$PWD/android-ndk-${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      # 复刻 cargo-ndk 真正起作用的机制：把工具链变量以 [真实环境变量] 形式用 env 注入
+      # cargo build（bash 的 export 不支持连字符变量名，故用 env 命令）。
+      # 关键：变量名用 Rust target triple（armv7-linux-androideabi / i686-linux-android），
+      # 值指向 NDK 包装脚本（armv7a-linux-androideabi<api>-clang / i686-linux-android<api>-clang），
+      # cc-rs 通过 CC_<triple> 读取，从而不再回退去探测旧式命名。
+      - name: Build release binaries for Android
+        run: |
+          set -euo pipefail
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          API="${{ env.ANDROID_API }}"
+          echo "NDK_BIN=$NDK_BIN"
+          ls "$NDK_BIN" | grep -E "clang$|llvm-ar$" | head
+
+          # <triple><api>-clang 优先；不存在则回退到 <triple>-clang。
+          # 注意 armv7 的 NDK clang 前缀是 armv7a-（多一个 a），而 Rust triple 是 armv7-。
+          clang_for() {
+            local triple="$1" w
+            w="$NDK_BIN/${triple}${API}-clang"
+            [ -x "$w" ] || w="$NDK_BIN/${triple}-clang"
+            echo "$w"
+          }
+          CC_A="$(clang_for aarch64-linux-android)"
+          CC_V7="$(clang_for armv7a-linux-androideabi)"
+          CC_X86="$(clang_for i686-linux-android)"
+          echo "aarch64 clang: $CC_A"
+          echo "armv7   clang: $CC_V7"
+          echo "i686    clang: $CC_X86"
+
+          # getifaddrs shim for ALL targets: some old Android firmwares (e.g. the
+          # "mangosteen" aarch64 box, kernel 3.10.x; also reported on AOW-PC x86)
+          # ship a bionic lacking getifaddrs even though the Rust prebuilt std::net
+          # references it as a hard symbol, causing "cannot locate symbol getifaddrs"
+          # at load time. Provide a no-op shim (empty interface list) for every
+          # target so the binaries don't depend on the device bionic for this symbol.
+          # (cloudflare-ddns discovers its public IP via external services, so an
+          # empty interface list is harmless.)
+          SHIM_A="$PWD/getifaddrs_shim_aarch64.o"
+          SHIM_V7="$PWD/getifaddrs_shim_armv7.o"
+          SHIM_X86="$PWD/getifaddrs_shim_i686.o"
+          "$CC_A"   libs/getifaddrs_shim.c -c -o "$SHIM_A"
+          "$CC_V7"  libs/getifaddrs_shim.c -c -o "$SHIM_V7"
+          "$CC_X86" libs/getifaddrs_shim.c -c -o "$SHIM_X86"
+          echo "getifaddrs shims: $SHIM_A $SHIM_V7 $SHIM_X86"
+
+          mkdir -p out
+          env \
+            CC_aarch64-linux-android="$CC_A" \
+            CXX_aarch64-linux-android="$CC_A++" \
+            AR_aarch64-linux-android="$NDK_BIN/llvm-ar" \
+            RANLIB_aarch64-linux-android="$NDK_BIN/llvm-ranlib" \
+            CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_A" \
+            CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$NDK_BIN/llvm-ar" \
+            CC_armv7-linux-androideabi="$CC_V7" \
+            CXX_armv7-linux-androideabi="$CC_V7++" \
+            AR_armv7-linux-androideabi="$NDK_BIN/llvm-ar" \
+            RANLIB_armv7-linux-androideabi="$NDK_BIN/llvm-ranlib" \
+            CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$CC_V7" \
+            CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_AR="$NDK_BIN/llvm-ar" \
+            CC_i686-linux-android="$CC_X86" \
+            CXX_i686-linux-android="$CC_X86++" \
+            AR_i686-linux-android="$NDK_BIN/llvm-ar" \
+            RANLIB_i686-linux-android="$NDK_BIN/llvm-ranlib" \
+            CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$CC_X86" \
+            CARGO_TARGET_I686_LINUX_ANDROID_AR="$NDK_BIN/llvm-ar" \
+            CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=$SHIM_A" \
+            CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS="-Clink-arg=$SHIM_V7" \
+            CARGO_TARGET_I686_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=$SHIM_X86" \
+            cargo build \
+              --target aarch64-linux-android \
+              --target armv7-linux-androideabi \
+              --target i686-linux-android \
+              --release
+          cp -v "target/aarch64-linux-android/release/cloudflare-ddns" "out/cloudflare-ddns-arm64-v8a"
+          cp -v "target/armv7-linux-androideabi/release/cloudflare-ddns" "out/cloudflare-ddns-armeabi-v7a"
+          cp -v "target/i686-linux-android/release/cloudflare-ddns" "out/cloudflare-ddns-x86"
+          ls -l out
+          file out/cloudflare-ddns-* || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-ddns-android
+          path: out/cloudflare-ddns-*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: android
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cloudflare-ddns-android
+          path: dist
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/cloudflare-ddns-*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
