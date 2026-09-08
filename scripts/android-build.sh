@@ -93,26 +93,49 @@ for abi in "${ABIS[@]}"; do
 done
 
 echo "==> 构建 Android (API ${ANDROID_API}): ${TARGET_ARGS[*]}"
+
 # 通过 env 注入工具链变量（bash 无法 export 连字符变量名，故用 env 命令）。
-env \
-  CC_aarch64-linux-android="$CC_A" \
-  CXX_aarch64-linux-android="$CC_A++" \
-  AR_aarch64-linux-android="$NDK_BIN/llvm-ar" \
-  RANLIB_aarch64-linux-android="$NDK_BIN/llvm-ranlib" \
-  CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_A" \
-  CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$NDK_BIN/llvm-ar" \
-  CC_armv7-linux-androideabi="$CC_V7" \
-  CXX_armv7-linux-androideabi="$CC_V7++" \
-  AR_armv7-linux-androideabi="$NDK_BIN/llvm-ar" \
-  RANLIB_armv7-linux-androideabi="$NDK_BIN/llvm-ranlib" \
-  CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$CC_V7" \
-  CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_AR="$NDK_BIN/llvm-ar" \
-  CC_i686-linux-android="$CC_X86" \
-  CXX_i686-linux-android="$CC_X86++" \
-  AR_i686-linux-android="$NDK_BIN/llvm-ar" \
-  RANLIB_i686-linux-android="$NDK_BIN/llvm-ranlib" \
-  CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$CC_X86" \
-  CARGO_TARGET_I686_LINUX_ANDROID_AR="$NDK_BIN/llvm-ar" \
+# 用数组累积，便于按需为 i686 追加 getifaddrs 垫片链接参数。
+ENV_ARGS=(
+  CC_aarch64-linux-android="$CC_A"
+  CXX_aarch64-linux-android="$CC_A++"
+  AR_aarch64-linux-android="$NDK_BIN/llvm-ar"
+  RANLIB_aarch64-linux-android="$NDK_BIN/llvm-ranlib"
+  CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_A"
+  CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$NDK_BIN/llvm-ar"
+  CC_armv7-linux-androideabi="$CC_V7"
+  CXX_armv7-linux-androideabi="$CC_V7++"
+  AR_armv7-linux-androideabi="$NDK_BIN/llvm-ar"
+  RANLIB_armv7-linux-androideabi="$NDK_BIN/llvm-ranlib"
+  CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$CC_V7"
+  CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_AR="$NDK_BIN/llvm-ar"
+  CC_i686-linux-android="$CC_X86"
+  CXX_i686-linux-android="$CC_X86++"
+  AR_i686-linux-android="$NDK_BIN/llvm-ar"
+  RANLIB_i686-linux-android="$NDK_BIN/llvm-ranlib"
+  CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$CC_X86"
+  CARGO_TARGET_I686_LINUX_ANDROID_AR="$NDK_BIN/llvm-ar"
+)
+
+# getifaddrs 垫片：部分老旧 Android 固件（如 mangosteen aarch64 机顶盒，内核 3.10.x；
+# 以及 AOW-PC x86）bionic 缺 getifaddrs（即便 Rust 预编译 std::net 把它当硬符号引用），
+# 动态链接器加载时即报 "cannot locate symbol getifaddrs"。为每个目标编译 no-op 垫片
+# （空接口列表）并链入，使二进制不依赖设备 bionic 的该符号。DDNS 用外部服务查公网 IP，
+# 不枚举本地网卡，返回空列表无害。
+triple_to_env() { echo "$1" | tr '[:lower:]' '[:upper:]' | tr '.-' '__'; }
+for t in "${TARGET_ARGS[@]}"; do
+  case "$t" in
+    aarch64-linux-android)      cc="$CC_A";   obj="$PWD/getifaddrs_shim_aarch64.o";;
+    armv7-linux-androideabi)    cc="$CC_V7";  obj="$PWD/getifaddrs_shim_armv7.o";;
+    i686-linux-android)         cc="$CC_X86"; obj="$PWD/getifaddrs_shim_i686.o";;
+    *) continue;;
+  esac
+  "$cc" libs/getifaddrs_shim.c -c -o "$obj"
+  ENV_ARGS+=( "CARGO_TARGET_$(triple_to_env "$t")_RUSTFLAGS=-Clink-arg=$obj" )
+  echo "==> getifaddrs 垫片: $obj"
+done
+
+env "${ENV_ARGS[@]}" \
   cargo build --release $(printf -- '--target %s ' "${TARGET_ARGS[@]}")
 
 mkdir -p out
