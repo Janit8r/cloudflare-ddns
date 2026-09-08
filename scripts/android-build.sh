@@ -3,12 +3,13 @@
 # 本地复现 Android 交叉编译 (cloudflare-ddns)
 # -----------------------------------------------------------------------------
 # 与 CI (.github/workflows/android.yml) 使用相同的工具链机制：
-# 把每个 Android target 的 linker / CC / CXX / AR 指向 NDK 的 clang 包装脚本，
+# 把每个 Android target 的 linker / CC / CXX / AR 作为【真实环境变量】注入
+# （CC_<triple> / CARGO_TARGET_<TRIPLE>_LINKER 等指向 NDK 的 clang 包装脚本），
 # 规避 ring 的 cc-rs 因 NDK clang 命名差异 (arm-linux-androideabi vs
-# armv7a-linux-androideabi) 而失败的坑，并正确产出可执行文件。
+# armv7a-linux-androideabi) 与 cargo 不支持 [target.<triple>.env] 而失败的坑，正确产出可执行文件。
 #
-# 注意: 本项目是纯 bin 守护进程，不能使用 cargo-ndk（它只复制 cdylib 产物），
-#       因此这里直接生成 .cargo/config.toml 后用 cargo build --target 构建。
+# 注意: 本项目是纯 bin 守护进程，不能使用 cargo-ndk（它只复制 cdylib 产物）；
+#       且 cargo 配置不支持 [target.<triple>.env]，必须用真实环境变量注入。
 #
 # 用法:
 #   ./scripts/android-build.sh                  # 构建全部目标 (arm64-v8a + armeabi-v7a)
@@ -47,7 +48,10 @@ if [ ! -d "$NDK_DIR" ]; then
 fi
 export ANDROID_NDK_HOME="$PWD/$NDK_DIR"
 
-# 生成 .cargo/config.toml：复刻 cargo-ndk 的工具链配置（见 CI 文件头注释）
+# 注入工具链环境变量（见 CI 注释）：Cargo 配置不支持 [target.<triple>.env]，且 bash 的
+# export 不支持连字符变量名（CC_armv7-linux-androideabi），因此必须用 `env VAR=val ...` 形式
+# 注入。变量名用 Rust target triple（armv7-linux-androideabi），值指向 NDK 包装脚本
+# （armv7a-linux-androideabi<api>-clang），cc-rs 通过 CC_<triple> 读取。
 NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/${NDK_OS}-${NDK_ARCH}/bin"
 echo "==> NDK_BIN = $NDK_BIN"
 API="$ANDROID_API"
@@ -59,32 +63,10 @@ clang_for() {
   [ -x "$w" ] || w="$NDK_BIN/${triple}-clang"
   echo "$w"
 }
-CC_AARCH64="$(clang_for aarch64-linux-android)"
-CC_ARMV7="$(clang_for armv7a-linux-androideabi)"
-echo "==> CC_AARCH64 = $CC_AARCH64"
-echo "==> CC_ARMV7  = $CC_ARMV7"
-
-mkdir -p .cargo
-cat > .cargo/config.toml <<EOF
-# 本地自动生成：NDK ${NDK_VERSION} 交叉编译工具链配置（Android targets）。
-[target.aarch64-linux-android]
-linker = "$CC_AARCH64"
-
-[target.aarch64-linux-android.env]
-CC_aarch64-linux-android     = "$CC_AARCH64"
-CXX_aarch64-linux-android    = "${CC_AARCH64}++"
-AR_aarch64-linux-android     = "$NDK_BIN/llvm-ar"
-RANLIB_aarch64-linux-android = "$NDK_BIN/llvm-ranlib"
-
-[target.armv7-linux-androideabi]
-linker = "$CC_ARMV7"
-
-[target.armv7-linux-androideabi.env]
-CC_armv7-linux-androideabi     = "$CC_ARMV7"
-CXX_armv7-linux-androideabi    = "${CC_ARMV7}++"
-AR_armv7-linux-androideabi     = "$NDK_BIN/llvm-ar"
-RANLIB_armv7-linux-androideabi = "$NDK_BIN/llvm-ranlib"
-EOF
+CC_A="$(clang_for aarch64-linux-android)"
+CC_V7="$(clang_for armv7a-linux-androideabi)"
+echo "==> aarch64 clang: $CC_A"
+echo "==> armv7   clang: $CC_V7"
 
 ABIS=("$@")
 if [ ${#ABIS[@]} -eq 0 ]; then
@@ -102,7 +84,21 @@ for abi in "${ABIS[@]}"; do
 done
 
 echo "==> 构建 Android (API ${ANDROID_API}): ${TARGET_ARGS[*]}"
-cargo build --release $(printf -- '--target %s ' "${TARGET_ARGS[@]}")
+# 通过 env 注入工具链变量（bash 无法 export 连字符变量名，故用 env 命令）。
+env \
+  CC_aarch64-linux-android="$CC_A" \
+  CXX_aarch64-linux-android="$CC_A++" \
+  AR_aarch64-linux-android="$NDK_BIN/llvm-ar" \
+  RANLIB_aarch64-linux-android="$NDK_BIN/llvm-ranlib" \
+  CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_A" \
+  CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$NDK_BIN/llvm-ar" \
+  CC_armv7-linux-androideabi="$CC_V7" \
+  CXX_armv7-linux-androideabi="$CC_V7++" \
+  AR_armv7-linux-androideabi="$NDK_BIN/llvm-ar" \
+  RANLIB_armv7-linux-androideabi="$NDK_BIN/llvm-ranlib" \
+  CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$CC_V7" \
+  CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_AR="$NDK_BIN/llvm-ar" \
+  cargo build --release $(printf -- '--target %s ' "${TARGET_ARGS[@]}")
 
 mkdir -p out
 for target in "${TARGET_ARGS[@]}"; do
