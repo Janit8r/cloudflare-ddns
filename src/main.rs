@@ -32,7 +32,10 @@ pub(crate) fn client_builder() -> reqwest::ClientBuilder {
         let tls = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
-        return reqwest::Client::builder().use_preconfigured_tls(Some(tls));
+        // 注意：reqwest 0.13 的 use_preconfigured_tls 内部会再做一层 Option 包装并 downcast，
+        // 因此这里必须传「裸的」 ClientConfig，不能包成 Some(...)，否则 downcast 失败报
+        // "Unknown TLS backend passed to `use_preconfigured_tls`"。
+        return reqwest::Client::builder().use_preconfigured_tls(tls);
     }
     #[cfg(not(target_os = "android"))]
     {
