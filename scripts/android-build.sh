@@ -12,10 +12,15 @@
 #       且 cargo 配置不支持 [target.<triple>.env]，必须用真实环境变量注入。
 #
 # 用法:
-#   ./scripts/android-build.sh                  # 构建全部目标 (arm64-v8a + armeabi-v7a)
+#   ./scripts/android-build.sh                  # 构建全部目标 (arm64-v8a + armeabi-v7a + x86)
 #   ./scripts/android-build.sh arm64-v8a        # 仅构建指定 ABI
 #
-# 依赖: curl, unzip, rustup (已添加 aarch64-linux-android / armv7-linux-androideabi)
+# 目标映射:
+#   arm64-v8a   -> aarch64-linux-android
+#   armeabi-v7a -> armv7-linux-androideabi     (NDK clang 前缀是 armv7a-...)
+#   x86         -> i686-linux-android           (32 位 x86；NDK r27 仍支持该 ABI)
+#
+# 依赖: curl, unzip, rustup (已添加 aarch64-linux-android / armv7-linux-androideabi / i686-linux-android)
 # =============================================================================
 set -euo pipefail
 
@@ -49,14 +54,15 @@ fi
 export ANDROID_NDK_HOME="$PWD/$NDK_DIR"
 
 # 注入工具链环境变量（见 CI 注释）：Cargo 配置不支持 [target.<triple>.env]，且 bash 的
-# export 不支持连字符变量名（CC_armv7-linux-androideabi），因此必须用 `env VAR=val ...` 形式
-# 注入。变量名用 Rust target triple（armv7-linux-androideabi），值指向 NDK 包装脚本
-# （armv7a-linux-androideabi<api>-clang），cc-rs 通过 CC_<triple> 读取。
+# export 不支持连字符变量名（CC_armv7-linux-androideabi / CC_i686-linux-android），因此必须用
+# `env VAR=val ...` 形式注入。变量名用 Rust target triple，值指向 NDK 包装脚本
+# （armv7a-linux-androideabi<api>-clang / i686-linux-android<api>-clang），cc-rs 通过 CC_<triple> 读取。
 NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/${NDK_OS}-${NDK_ARCH}/bin"
 echo "==> NDK_BIN = $NDK_BIN"
 API="$ANDROID_API"
 
 # 解析每个 target 对应的 NDK clang 包装脚本（API 级别不存在时回退到无 API 的版本）
+# 注意 armv7 的 NDK clang 前缀是 armv7a-（多一个 a），而 Rust triple 是 armv7-。
 clang_for() {
   local triple="$1" w
   w="$NDK_BIN/${triple}${API}-clang"
@@ -65,12 +71,14 @@ clang_for() {
 }
 CC_A="$(clang_for aarch64-linux-android)"
 CC_V7="$(clang_for armv7a-linux-androideabi)"
+CC_X86="$(clang_for i686-linux-android)"
 echo "==> aarch64 clang: $CC_A"
 echo "==> armv7   clang: $CC_V7"
+echo "==> i686    clang: $CC_X86"
 
 ABIS=("$@")
 if [ ${#ABIS[@]} -eq 0 ]; then
-  ABIS=(arm64-v8a armeabi-v7a)
+  ABIS=(arm64-v8a armeabi-v7a x86)
 fi
 
 # 把 ABI 映射回 Rust target triple
@@ -79,7 +87,8 @@ for abi in "${ABIS[@]}"; do
   case "$abi" in
     arm64-v8a)   TARGET_ARGS+=(aarch64-linux-android);;
     armeabi-v7a) TARGET_ARGS+=(armv7-linux-androideabi);;
-    *) echo "未知 ABI: $abi (支持 arm64-v8a / armeabi-v7a)" >&2; exit 1;;
+    x86)         TARGET_ARGS+=(i686-linux-android);;
+    *) echo "未知 ABI: $abi (支持 arm64-v8a / armeabi-v7a / x86)" >&2; exit 1;;
   esac
 done
 
@@ -98,6 +107,12 @@ env \
   RANLIB_armv7-linux-androideabi="$NDK_BIN/llvm-ranlib" \
   CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$CC_V7" \
   CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_AR="$NDK_BIN/llvm-ar" \
+  CC_i686-linux-android="$CC_X86" \
+  CXX_i686-linux-android="$CC_X86++" \
+  AR_i686-linux-android="$NDK_BIN/llvm-ar" \
+  RANLIB_i686-linux-android="$NDK_BIN/llvm-ranlib" \
+  CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$CC_X86" \
+  CARGO_TARGET_I686_LINUX_ANDROID_AR="$NDK_BIN/llvm-ar" \
   cargo build --release $(printf -- '--target %s ' "${TARGET_ARGS[@]}")
 
 mkdir -p out
@@ -106,6 +121,7 @@ for target in "${TARGET_ARGS[@]}"; do
   case "$target" in
     aarch64-linux-android)  abi=arm64-v8a;;
     armv7-linux-androideabi) abi=armeabi-v7a;;
+    i686-linux-android)      abi=x86;;
   esac
   cp -v "$src" "out/cloudflare-ddns-$abi"
   echo "    产物: out/cloudflare-ddns-$abi"
