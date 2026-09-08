@@ -5,25 +5,29 @@ name: Android Build
 #
 # 关键决策（踩坑记录）：
 #   1) 项目用 rustls + ring（无 OpenSSL C 依赖），交叉编译仅需正确的 NDK 工具链。
-#   2) 第一版手动设置 CC_*/CARGO_TARGET_*_LINKER 环境变量失败了：ring 的 cc-rs 按
-#      旧式命名探测 "arm-linux-androideabi-clang"（NDK r27 实际为
-#      "armv7a-linux-androideabi<api>-clang"），armeabi-v7a 构建挂掉。
-#   3) 第二版改用 cargo-ndk，编译能通过，但它在收尾阶段报
-#      "No usable artifacts produced by cargo ... Did you set the crate-type to
-#      cdylib?" 后退出 1 —— 因为 cargo-ndk 只复制 cdylib 产物，而本项目是纯
-#      bin 守护进程（无任何 cdylib），所以它永远无法用于本仓库。
-#   4) 最终方案（本文件）：丢掉 cargo-ndk 的复制阶段，直接复刻它底层的工具链配置
-#      —— 把每个 Android target 的 linker / CC / CXX / AR 指向 NDK 的 clang 包装脚本
-#      （aarch64-linux-android24-clang、armv7a-linux-androideabi24-clang）+ llvm-ar。
-#      这样既能规避 armv7 命名差异，又能正确产出可执行文件，再由我们手动拷贝产物。
+#   2) 第一版手动设置 CC_*/CARGO_TARGET_*_LINKER 环境变量，但 ring 的 cc-rs 构建脚本
+#      按旧式命名探测 "arm-linux-androideabi-clang"（NDK r27 实际为
+#      "armv7a-linux-androideabi<api>-clang"），armeabi-v7a 构建失败。
+#   3) 第二版改用 cargo-ndk，编译能通过，但收尾报
+#      "No usable artifacts produced by cargo ... cdylib?" 退出 1 —— cargo-ndk 只复制
+#      cdylib 产物，而本项目是纯 bin 守护进程（无 cdylib），故永远不可用。
+#   4) 第三版改用 .cargo/config.toml 的 [target.<triple>.env] 注入 CC —— 但 Cargo 根本
+#      不支持 [target.<triple>.env]，该段被静默忽略，CC 仍为空，ring 再次回退探测
+#      arm-linux-androideabi-clang 而失败。
+#   5) 最终方案（本文件）：复刻 cargo-ndk 真正起作用的机制 —— 把每个 Android target 的
+#      linker / CC / CXX / AR 作为【真实环境变量】，用 `env VAR=val ... cargo build`
+#      注入（注意：bash 的 export 不支持连字符变量名 CC_armv7-linux-androideabi，必须用
+#      env 或 GitHub 的 $GITHUB_ENV，二者都走 OS 级 setenv）。变量名用 Rust target triple
+#      （armv7-linux-androideabi），值指向 NDK 包装脚本（armv7a-linux-androideabi<api>-clang），
+#      差异在此对齐。最后由我们手动拷贝产物。
 #
 # 运行环境：
-#   默认 runs-on: ubuntu-latest（x86_64 官方托管机），可运行标准 x86_64 NDK 并交叉
-#   编译 Android ARM 产物，这是最稳妥的方案。
-#   若需在你描述的 armv8l (32 位 ARM) 自托管 Runner 上运行：官方 NDK 没有 32 位 ARM
-#   宿主包，x86_64 版 NDK 无法在 armv8l 上执行。请改用官方 ubuntu-latest，或若自托管
-#   机实际为 64 位 ARM(aarch64)，把 NDK 下载包换成 linux-aarch64 版（NDK r25+）并改
-#   prebuilt 目录为 linux-aarch64。你描述的 armv8l 目标设备对应下方 armeabi-v7a 产物。
+#   默认 runs-on: ubuntu-latest（x86_64 官方托管机），可运行标准 x86_64 NDK 并交叉编译
+#   Android ARM 产物，这是最稳妥的方案。
+#   若需在你描述的 armv8l (32 位 ARM) 自托管 Runner 上运行：官方 NDK 没有 32 位 ARM 宿主
+#   包，x86_64 版 NDK 无法在 armv8l 上执行。请改用官方 ubuntu-latest，或若自托管机实际为
+#   64 位 ARM(aarch64)，把 NDK 下载包换成 linux-aarch64 版（NDK r25+）并改 prebuilt 目录为
+#   linux-aarch64。你描述的 armv8l 目标设备对应下方 armeabi-v7a 产物。
 # -------------------------------------------------------------------------------
 
 on:
@@ -76,11 +80,12 @@ jobs:
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
 
-      # 复刻 cargo-ndk 的工具链配置（见文件头注释）：
-      # 为每个 Android target 设置 linker / CC / CXX / AR 指向 NDK clang 包装脚本。
-      # 关键点：armeabi-v7a 对应的 Rust target 是 armv7-linux-androideabi，而 NDK
-      # 的 clang 包装脚本命名为 armv7a-linux-androideabi<api>-clang，差异由这里补齐。
-      - name: Configure NDK toolchain for Cargo
+      # 复刻 cargo-ndk 真正起作用的机制：把工具链变量以 [真实环境变量] 形式用 env 注入
+      # cargo build（bash 的 export 不支持连字符变量名，故用 env 命令）。
+      # 关键：变量名用 Rust target triple（armv7-linux-androideabi），值指向 NDK 包装脚本
+      # （armv7a-linux-androideabi<api>-clang），cc-rs 通过 CC_<triple> 读取，从而不再回退
+      # 去探测旧式 arm-linux-androideabi-clang。
+      - name: Build release binaries for Android
         run: |
           set -euo pipefail
           NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -88,52 +93,36 @@ jobs:
           echo "NDK_BIN=$NDK_BIN"
           ls "$NDK_BIN" | grep -E "clang$|llvm-ar$" | head
 
-          # 解析每个 target 对应的 NDK clang 包装脚本。
-          # NDK r27 提供 <triple><api>-clang 形式（如 aarch64-linux-android24-clang）；
-          # 若指定 API 级别的包装脚本不存在，回退到无 API 的 <triple>-clang。
+          # <triple><api>-clang 优先；不存在则回退到 <triple>-clang。
           clang_for() {
             local triple="$1" w
             w="$NDK_BIN/${triple}${API}-clang"
             [ -x "$w" ] || w="$NDK_BIN/${triple}-clang"
             echo "$w"
           }
-          CC_AARCH64="$(clang_for aarch64-linux-android)"
-          CC_ARMV7="$(clang_for armv7a-linux-androideabi)"
-          echo "CC_AARCH64=$CC_AARCH64"
-          echo "CC_ARMV7=$CC_ARMV7"
+          CC_A="$(clang_for aarch64-linux-android)"
+          CC_V7="$(clang_for armv7a-linux-androideabi)"
+          echo "aarch64 clang: $CC_A"
+          echo "armv7   clang: $CC_V7"
 
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<EOF
-          # 由 CI 自动生成：NDK r27c 交叉编译工具链配置（Android targets）。
-          [target.aarch64-linux-android]
-          linker = "$CC_AARCH64"
-
-          [target.aarch64-linux-android.env]
-          CC_aarch64-linux-android     = "$CC_AARCH64"
-          CXX_aarch64-linux-android    = "${CC_AARCH64}++"
-          AR_aarch64-linux-android     = "$NDK_BIN/llvm-ar"
-          RANLIB_aarch64-linux-android = "$NDK_BIN/llvm-ranlib"
-
-          [target.armv7-linux-androideabi]
-          linker = "$CC_ARMV7"
-
-          [target.armv7-linux-androideabi.env]
-          CC_armv7-linux-androideabi     = "$CC_ARMV7"
-          CXX_armv7-linux-androideabi    = "${CC_ARMV7}++"
-          AR_armv7-linux-androideabi     = "$NDK_BIN/llvm-ar"
-          RANLIB_armv7-linux-androideabi = "$NDK_BIN/llvm-ranlib"
-          EOF
-          echo "----- .cargo/config.toml -----"
-          cat .cargo/config.toml
-
-      - name: Build release binaries for Android
-        run: |
-          set -euo pipefail
           mkdir -p out
-          cargo build \
-            --target aarch64-linux-android \
-            --target armv7-linux-androideabi \
-            --release
+          env \
+            CC_aarch64-linux-android="$CC_A" \
+            CXX_aarch64-linux-android="$CC_A++" \
+            AR_aarch64-linux-android="$NDK_BIN/llvm-ar" \
+            RANLIB_aarch64-linux-android="$NDK_BIN/llvm-ranlib" \
+            CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_A" \
+            CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$NDK_BIN/llvm-ar" \
+            CC_armv7-linux-androideabi="$CC_V7" \
+            CXX_armv7-linux-androideabi="$CC_V7++" \
+            AR_armv7-linux-androideabi="$NDK_BIN/llvm-ar" \
+            RANLIB_armv7-linux-androideabi="$NDK_BIN/llvm-ranlib" \
+            CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$CC_V7" \
+            CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_AR="$NDK_BIN/llvm-ar" \
+            cargo build \
+              --target aarch64-linux-android \
+              --target armv7-linux-androideabi \
+              --release
           cp -v "target/aarch64-linux-android/release/cloudflare-ddns" "out/cloudflare-ddns-arm64-v8a"
           cp -v "target/armv7-linux-androideabi/release/cloudflare-ddns" "out/cloudflare-ddns-armeabi-v7a"
           ls -l out
