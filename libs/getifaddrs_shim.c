@@ -26,13 +26,16 @@
 #include <ifaddrs.h>
 #include <stdlib.h>
 
-int getifaddrs(struct ifaddrs **ifap) {
+/* Keep the symbols even if the linker's --gc-sections thinks they're unused. */
+#define USED __attribute__((used, visibility("default")))
+
+int USED getifaddrs(struct ifaddrs **ifap) {
     if (ifap) {
         *ifap = NULL;
     }
     return 0; /* success, no addresses */
 }
 
-void freeifaddrs(struct ifaddrs *ifa) {
+void USED freeifaddrs(struct ifaddrs *ifa) {
     (void)ifa; /* nothing allocated */
 }
