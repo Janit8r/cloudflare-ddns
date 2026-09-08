@@ -23,11 +23,20 @@ name: Android Build
 #
 # 运行环境：
 #   默认 runs-on: ubuntu-latest（x86_64 官方托管机），可运行标准 x86_64 NDK 并交叉编译
-#   Android ARM 产物，这是最稳妥的方案。
+#   Android ARM / x86 产物，这是最稳妥的方案。
 #   若需在你描述的 armv8l (32 位 ARM) 自托管 Runner 上运行：官方 NDK 没有 32 位 ARM 宿主
 #   包，x86_64 版 NDK 无法在 armv8l 上执行。请改用官方 ubuntu-latest，或若自托管机实际为
 #   64 位 ARM(aarch64)，把 NDK 下载包换成 linux-aarch64 版（NDK r25+）并改 prebuilt 目录为
 #   linux-aarch64。你描述的 armv8l 目标设备对应下方 armeabi-v7a 产物。
+#
+# 目标架构映射：
+#   - aarch64-linux-android  → arm64-v8a     （64 位 ARM）
+#   - armv7-linux-androideabi → armeabi-v7a   （32 位 ARM；NDK clang 前缀是 armv7a-...）
+#   - i686-linux-android      → x86           （32 位 x86；NDK r27 仍支持该 ABI，ring 0.17
+#                                               的 Android 平台支持含 OPENSSL_X86，可编译）
+#   注: 你给的内核信息用于判断目标设备架构。i686 设备（内核 3.10.0 的老机器）对应 x86；
+#       NDK r25+ 最低 API 为 21，若设备系统低于 Android 5.0(API 21)，API 24 产物可能
+#       因缺少 bionic 符号而无法运行，遇此情况需下调 ANDROID_API 或换旧版 NDK。
 # -------------------------------------------------------------------------------
 
 on:
@@ -49,7 +58,7 @@ env:
 
 jobs:
   android:
-    name: Build Android (arm64-v8a + armeabi-v7a)
+    name: Build Android (arm64-v8a + armeabi-v7a + x86)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -58,7 +67,7 @@ jobs:
       - name: Set up Rust toolchain (with Android targets)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android
 
       - name: Cache Android NDK
         id: ndk
@@ -82,9 +91,9 @@ jobs:
 
       # 复刻 cargo-ndk 真正起作用的机制：把工具链变量以 [真实环境变量] 形式用 env 注入
       # cargo build（bash 的 export 不支持连字符变量名，故用 env 命令）。
-      # 关键：变量名用 Rust target triple（armv7-linux-androideabi），值指向 NDK 包装脚本
-      # （armv7a-linux-androideabi<api>-clang），cc-rs 通过 CC_<triple> 读取，从而不再回退
-      # 去探测旧式 arm-linux-androideabi-clang。
+      # 关键：变量名用 Rust target triple（armv7-linux-androideabi / i686-linux-android），
+      # 值指向 NDK 包装脚本（armv7a-linux-androideabi<api>-clang / i686-linux-android<api>-clang），
+      # cc-rs 通过 CC_<triple> 读取，从而不再回退去探测旧式命名。
       - name: Build release binaries for Android
         run: |
           set -euo pipefail
@@ -94,6 +103,7 @@ jobs:
           ls "$NDK_BIN" | grep -E "clang$|llvm-ar$" | head
 
           # <triple><api>-clang 优先；不存在则回退到 <triple>-clang。
+          # 注意 armv7 的 NDK clang 前缀是 armv7a-（多一个 a），而 Rust triple 是 armv7-。
           clang_for() {
             local triple="$1" w
             w="$NDK_BIN/${triple}${API}-clang"
@@ -102,8 +112,10 @@ jobs:
           }
           CC_A="$(clang_for aarch64-linux-android)"
           CC_V7="$(clang_for armv7a-linux-androideabi)"
+          CC_X86="$(clang_for i686-linux-android)"
           echo "aarch64 clang: $CC_A"
           echo "armv7   clang: $CC_V7"
+          echo "i686    clang: $CC_X86"
 
           mkdir -p out
           env \
@@ -119,12 +131,20 @@ jobs:
             RANLIB_armv7-linux-androideabi="$NDK_BIN/llvm-ranlib" \
             CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$CC_V7" \
             CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_AR="$NDK_BIN/llvm-ar" \
+            CC_i686-linux-android="$CC_X86" \
+            CXX_i686-linux-android="$CC_X86++" \
+            AR_i686-linux-android="$NDK_BIN/llvm-ar" \
+            RANLIB_i686-linux-android="$NDK_BIN/llvm-ranlib" \
+            CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$CC_X86" \
+            CARGO_TARGET_I686_LINUX_ANDROID_AR="$NDK_BIN/llvm-ar" \
             cargo build \
               --target aarch64-linux-android \
               --target armv7-linux-androideabi \
+              --target i686-linux-android \
               --release
           cp -v "target/aarch64-linux-android/release/cloudflare-ddns" "out/cloudflare-ddns-arm64-v8a"
           cp -v "target/armv7-linux-androideabi/release/cloudflare-ddns" "out/cloudflare-ddns-armeabi-v7a"
+          cp -v "target/i686-linux-android/release/cloudflare-ddns" "out/cloudflare-ddns-x86"
           ls -l out
           file out/cloudflare-ddns-* || true
 
