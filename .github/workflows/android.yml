@@ -1,0 +1,147 @@
+# =============================================================================
+# Android 自动构建工作流 (Cloudflare DDNS)
+# -----------------------------------------------------------------------------
+# 目标: 在 GitHub Actions 上交叉编译本项目 (Rust) 的 Android 版本，并产出构建
+#       产物 (以及可选的 GitHub Release)。
+#
+# 关键设计说明
+# 1. 本项目依赖树使用 rustls + ring 作为 TLS 后端 (Cargo.toml 中
+#    `reqwest` 使用 `rustls-no-provider`)，不依赖 OpenSSL 的 C 库，
+#    因此交叉编译到 Android 比常见项目简单很多，只需正确的 NDK 链接器即可。
+# 2. 工作流默认运行在 GitHub 官方托管的 `ubuntu-latest` (x86_64 Linux) 上，
+#    它可运行标准的 x86_64 Android NDK，并交叉编译出 arm64-v8a / armeabi-v7a
+#    两种 Android 架构产物。
+# 3. 关于你描述的构建环境 "Linux 内核 4.9.170 / 架构 armv8l":
+#    - 这通常指*目标 Android 设备的运行环境* (32 位 ARMv8，对应 Android ABI
+#      `armeabi-v7a`)，本工作流已将 `armv7-linux-androideabi` 纳入构建矩阵。
+#    - 若你确实拥有 "armv8l" 的**自托管 Runner**: 官方 Android NDK **不提供
+#      32 位 ARM (armv8l / linux-arm) 预编译包**，x86_64 版 NDK 无法在 32 位
+#      ARM 上执行。此时推荐两种方案:
+#        a) 直接改用 GitHub 托管的 `ubuntu-latest` (无需改动，最稳妥);
+#        b) 若自托管 Runner 实际是 64 位 ARM (aarch64)，请把下方
+#           `runs-on` 改为你的自托管标签，并把 NDK 下载包换成
+#           `android-ndk-<ver>-linux-aarch64.zip` (NDK r25+)，
+#           同时将 prebuilt 目录 `linux-x86_64` 改为 `linux-aarch64`。
+# =============================================================================
+
+name: Android Build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+# 发布 Release 需要写入权限 (仅打 tag 时触发 release 作业)
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Android NDK 版本 (linux-x86_64 预编译包)
+  NDK_VERSION: r27c
+  # 产物兼容的最低 Android API Level (Android 7.0)。可按需下调到 21。
+  ANDROID_API: "24"
+
+jobs:
+  android:
+    name: Build ${{ matrix.abi }}
+    # 默认使用官方 x86_64 Linux Runner。若要改用自托管 Runner，
+    # 将下面这一行替换为例如: runs-on: [self-hosted, linux, arm]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 64 位 ARM (现代 Android 设备，含 API 26/28 的 armv8 设备)
+          - target: aarch64-linux-android
+            abi: arm64-v8a
+            clang: aarch64-linux-android
+            cargo_linker_env: CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER
+            cc_env: CC_AARCH64_LINUX_ANDROID
+            ar_env: AR_AARCH64_LINUX_ANDROID
+          # 32 位 ARM (armeabi-v7a)，对应你描述的 armv8l/32 位部署环境
+          - target: armv7-linux-androideabi
+            abi: armeabi-v7a
+            clang: armv7a-linux-androideabi
+            cargo_linker_env: CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER
+            cc_env: CC_ARMV7_LINUX_ANDROIDEABI
+            ar_env: AR_ARMV7_LINUX_ANDROIDEABI
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Android NDK
+        id: ndk-cache
+        uses: actions/cache@v4
+        with:
+          path: android-ndk-${{ env.NDK_VERSION }}
+          key: ndk-${{ env.NDK_VERSION }}-linux-x86_64
+
+      - name: Download Android NDK
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fSL -o ndk.zip \
+            "https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip"
+          unzip -q ndk.zip
+          rm -f ndk.zip
+
+      - name: Configure Android NDK toolchain
+        run: |
+          NDK="$PWD/android-ndk-${{ env.NDK_VERSION }}"
+          NDK_BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "NDK_BIN=$NDK_BIN" >> "$GITHUB_ENV"
+          # 让 cargo 使用 NDK 提供的 clang 作为该 Android target 的链接器/编译器
+          echo "${{ matrix.cargo_linker_env }}=${NDK_BIN}/${{ matrix.clang }}${{ env.ANDROID_API }}-clang" >> "$GITHUB_ENV"
+          echo "${{ matrix.cc_env }}=${NDK_BIN}/${{ matrix.clang }}${{ env.ANDROID_API }}-clang" >> "$GITHUB_ENV"
+          echo "${{ matrix.ar_env }}=${NDK_BIN}/llvm-ar" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p out
+          cp "target/${{ matrix.target }}/release/cloudflare-ddns" \
+             "out/cloudflare-ddns-${{ matrix.abi }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-ddns-${{ matrix.abi }}
+          path: out/cloudflare-ddns-${{ matrix.abi }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: android
+    # 仅在推送 v* tag 时打包发布
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/cloudflare-ddns-*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
