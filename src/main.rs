@@ -19,6 +19,27 @@ use std::sync::Arc;
 use tokio::signal;
 use tokio::time::{sleep, Duration};
 
+/// 在 Android 上，reqwest 的 rustls 后端默认使用 `rustls-platform-verifier` 验证证书，
+/// 而它必须传入 Android `Context`（来自 JVM）才能初始化。独立二进制（Termux / adb shell）
+/// 没有 Context，会在首次 HTTPS 请求时 panic。这里在 Android 目标上改用 webpki-roots
+/// （Mozilla 根证书）+ 标准 WebPkiVerifier，通过 `use_preconfigured_tls` 注入，彻底绕开
+/// 平台验证器，使独立二进制也能正常建立 TLS。
+pub(crate) fn client_builder() -> reqwest::ClientBuilder {
+    #[cfg(target_os = "android")]
+    {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        return reqwest::Client::builder().use_preconfigured_tls(Some(tls));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        reqwest::Client::builder()
+    }
+}
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main(flavor = "current_thread")]
@@ -124,7 +145,7 @@ async fn main() {
     heartbeat.start().await;
 
     let mut cf_cache = cf_ip_filter::CachedCloudflareFilter::new();
-    let detection_client = Client::builder()
+    let detection_client = crate::client_builder()
         .timeout(app_config.detection_timeout)
         .build()
         .unwrap_or_default();
@@ -421,7 +442,6 @@ mod tests {
             ttl: 300,
             ip4_provider: None,
             ip6_provider: None,
-            record_comment: None,
         }
     }
 
@@ -974,7 +994,6 @@ mod tests {
             ttl: 300,
             ip4_provider: None,
             ip6_provider: None,
-            record_comment: None,
         };
         ddns.commit_record(
             "198.51.100.7",
@@ -1106,7 +1125,6 @@ mod tests {
             ttl: 300,
             ip4_provider: None,
             ip6_provider: None,
-            record_comment: None,
         };
 
         ddns.commit_record(

@@ -110,7 +110,7 @@ enum ShoutrrrServiceType {
 
 impl ShoutrrrNotifier {
     pub fn new(urls: &[String]) -> Result<Self, String> {
-        let client = Client::builder()
+        let client = crate::client_builder()
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| format!("Failed to build notifier HTTP client: {e}"))?;
@@ -733,7 +733,7 @@ pub struct HealthchecksMonitor {
 
 impl HealthchecksMonitor {
     pub fn new(url: &str) -> Self {
-        let client = Client::builder()
+        let client = crate::client_builder()
             .timeout(Duration::from_secs(10))
             .build()
             .expect("Failed to build healthchecks client");
@@ -805,7 +805,7 @@ pub struct UptimeKumaMonitor {
 
 impl UptimeKumaMonitor {
     pub fn new(url: &str) -> Self {
-        let client = Client::builder()
+        let client = crate::client_builder()
             .timeout(Duration::from_secs(10))
             .build()
             .expect("Failed to build uptime kuma client");

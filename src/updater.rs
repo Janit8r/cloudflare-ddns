@@ -340,7 +340,7 @@ async fn update_legacy(
     };
 
     let ddns = LegacyDdnsClient {
-        client: Client::builder()
+        client: crate::client_builder()
             .timeout(config.update_timeout)
             .build()
             .unwrap_or_default(),
@@ -409,7 +409,7 @@ async fn update_legacy(
             .await
         {
             ips.retain(|key, ip_info| {
-                if let Ok(addr) = ip_info.ip.parse::<IpAddr>() {
+                if let Ok(addr) = ip_info.ip.parse::<std::net::IpAddr>() {
                     if cf_filter.contains(&addr) {
                         ppfmt.warningf(
                             pp::EMOJI_WARNING,
@@ -445,7 +445,6 @@ async fn update_legacy(
             legacy.ttl,
             legacy.purge_unknown_records,
             noop_reported,
-            config.record_comment.as_deref(),
         )
         .await;
 
@@ -600,20 +599,12 @@ impl LegacyDdnsClient {
         ttl: i64,
         purge_unknown_records: bool,
         noop_reported: &mut HashSet<String>,
-        comment: Option<&str>,
     ) -> (Vec<Message>, bool) {
         let mut messages = Vec::new();
         let mut notify = false;
         for ip in ips.values() {
             let (msgs, changed) = self
-                .commit_record(
-                    ip,
-                    config,
-                    ttl,
-                    purge_unknown_records,
-                    noop_reported,
-                    comment,
-                )
+                .commit_record(ip, config, ttl, purge_unknown_records, noop_reported)
                 .await;
             messages.extend(msgs);
             if changed {
@@ -630,7 +621,6 @@ impl LegacyDdnsClient {
         ttl: i64,
         purge_unknown_records: bool,
         noop_reported: &mut HashSet<String>,
-        comment: Option<&str>,
     ) -> (Vec<Message>, bool) {
         let mut messages = Vec::new();
         let mut changed = false;
@@ -670,7 +660,6 @@ impl LegacyDdnsClient {
                     content: ip.ip.clone(),
                     proxied,
                     ttl,
-                    comment: comment.map(|s| s.to_string()),
                 };
 
                 let dns_endpoint = format!(
@@ -698,10 +687,7 @@ impl LegacyDdnsClient {
                                     }
                                 } else {
                                     identifier = Some(r.id.clone());
-                                    if r.content != record.content
-                                        || r.proxied != record.proxied
-                                        || r.comment != record.comment
-                                    {
+                                    if r.content != record.content || r.proxied != record.proxied {
                                         modified = true;
                                     }
                                 }
@@ -1263,7 +1249,7 @@ mod tests {
         assert!(ok, "skip on detection failure should not be an error");
     }
 
-    /// A definitive "no address of this family" (e.g., provider `none`) with
+    /// A definitive "no address of this family" (e.g. provider `none`) with
     /// delete_on_failure enabled deletes the managed records (documented behavior).
     #[tokio::test]
     async fn test_update_once_no_ip_deletes_records_with_delete_on_failure() {
@@ -1609,7 +1595,7 @@ mod tests {
         assert!(ok);
     }
 
-    /// update_once with WAF lists: IPs are detected and the WAF list is updated.
+    /// update_once with WAF lists: IPs are detected and WAF list is updated.
     #[tokio::test]
     async fn test_update_once_with_waf_list() {
         let server = MockServer::start().await;
@@ -2015,7 +2001,7 @@ mod tests {
         final_delete(&config, &cf, &notifier, &heartbeat, &ppfmt).await;
     }
 
-    /// final_delete skips DNS deletion when the zone is not found.
+    /// final_delete skips DNS deletion when zone is not found.
     #[tokio::test]
     async fn test_final_delete_skips_when_zone_not_found() {
         let server = MockServer::start().await;
@@ -2253,7 +2239,7 @@ mod tests {
         let server = MockServer::start().await;
         let zone_id = "zone-abc";
         let domain_v6 = "v6only.example.com";
-        // Only a V4 literal provider is configured, but domain is V6
+        // Only a V4 literal provider is configured but domain is V6
         let ip_v4 = "198.51.100.1";
 
         // Zone lookup for V6 domain
@@ -2508,7 +2494,7 @@ mod tests {
             subdomains: vec![LegacySubdomainEntry::Simple("@".to_string())],
             proxied: false,
         }];
-        ddns.commit_record(&ip, &config, 300, false, &mut HashSet::new(), None)
+        ddns.commit_record(&ip, &config, 300, false, &mut HashSet::new())
             .await;
     }
 
@@ -2565,7 +2551,7 @@ mod tests {
             subdomains: vec![LegacySubdomainEntry::Simple("@".to_string())],
             proxied: false,
         }];
-        ddns.commit_record(&ip, &config, 300, false, &mut HashSet::new(), None)
+        ddns.commit_record(&ip, &config, 300, false, &mut HashSet::new())
             .await;
     }
 
@@ -2609,7 +2595,7 @@ mod tests {
             proxied: false,
         }];
         // Should not POST
-        ddns.commit_record(&ip, &config, 300, false, &mut HashSet::new(), None)
+        ddns.commit_record(&ip, &config, 300, false, &mut HashSet::new())
             .await;
     }
 
@@ -2663,7 +2649,7 @@ mod tests {
             }],
             proxied: false,
         }];
-        ddns.commit_record(&ip, &config, 300, false, &mut HashSet::new(), None)
+        ddns.commit_record(&ip, &config, 300, false, &mut HashSet::new())
             .await;
     }
 
@@ -2716,7 +2702,7 @@ mod tests {
             subdomains: vec![LegacySubdomainEntry::Simple("@".to_string())],
             proxied: false,
         }];
-        ddns.commit_record(&ip, &config, 300, true, &mut HashSet::new(), None)
+        ddns.commit_record(&ip, &config, 300, true, &mut HashSet::new())
             .await;
     }
 
@@ -2770,7 +2756,7 @@ mod tests {
             subdomains: vec![LegacySubdomainEntry::Simple("@".to_string())],
             proxied: false,
         }];
-        ddns.update_ips(&ips, &config, 300, false, &mut HashSet::new(), None)
+        ddns.update_ips(&ips, &config, 300, false, &mut HashSet::new())
             .await;
     }
 
@@ -3112,75 +3098,6 @@ mod tests {
         .await;
         assert!(ok, "Should succeed with both detections");
     }
-
-    /// update_once passes record_comment to the API when creating a new record.
-    #[tokio::test]
-    async fn test_update_once_with_record_comment() {
-        let server = MockServer::start().await;
-        let zone_id = "zone-abc";
-        let domain = "home.example.com";
-        let ip = "198.51.100.42";
-        let comment = "managed by cf-ddns";
-
-        // Zone lookup
-        Mock::given(method("GET"))
-            .and(path("/zones"))
-            .and(query_param("name", domain))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(zones_response(zone_id, "example.com")),
-            )
-            .mount(&server)
-            .await;
-
-        // List existing records (empty)
-        Mock::given(method("GET"))
-            .and(path_regex(format!("/zones/{zone_id}/dns_records")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(dns_records_empty()))
-            .mount(&server)
-            .await;
-
-        // Create record: POST should receive the comment in the body
-        Mock::given(method("POST"))
-            .and(path(format!("/zones/{zone_id}/dns_records")))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(dns_record_created("rec-1", domain, ip)),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let mut providers = HashMap::new();
-        providers.insert(
-            IpType::V4,
-            ProviderType::Literal {
-                ips: vec![ip.parse::<IpAddr>().unwrap()],
-            },
-        );
-        let mut domains = HashMap::new();
-        domains.insert(IpType::V4, vec![domain.to_string()]);
-
-        let mut config = make_config(providers, domains, vec![], false);
-        config.record_comment = Some(comment.to_string());
-
-        let cf = handle(&server.uri());
-        let notifier = empty_notifier();
-        let heartbeat = empty_heartbeat();
-        let ppfmt = pp();
-
-        let mut cf_cache = CachedCloudflareFilter::new();
-        let ok = update_once(
-            &config,
-            &cf,
-            &notifier,
-            &heartbeat,
-            &mut cf_cache,
-            &ppfmt,
-            &mut HashSet::new(),
-            &crate::test_client(),
-        )
-        .await;
-        assert!(ok, "Should succeed with record_comment set");
-    }
 }
 
 // Legacy types for backwards compatibility
@@ -3200,8 +3117,6 @@ struct LegacyDnsRecord {
     name: String,
     content: String,
     proxied: bool,
-    #[serde(default)]
-    comment: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -3212,6 +3127,4 @@ struct LegacyDnsRecordPayload {
     content: String,
     proxied: bool,
     ttl: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    comment: Option<String>,
 }

@@ -31,8 +31,6 @@ pub struct LegacyConfig {
     pub ip4_provider: Option<String>,
     #[serde(default)]
     pub ip6_provider: Option<String>,
-    #[serde(rename = "recordComment", alias = "record_comment", default)]
-    pub record_comment: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -478,7 +476,7 @@ fn legacy_to_app_config(
         delete_on_failure: false,
         ttl,
         proxied_expression: None,
-        record_comment: legacy.record_comment.clone(),
+        record_comment: None,
         managed_comment_regex: None,
         waf_list_description: None,
         waf_list_item_comment: None,
@@ -1065,7 +1063,6 @@ mod tests {
             ttl: 300,
             ip4_provider: None,
             ip6_provider: None,
-            record_comment: None,
         };
         let config = legacy_to_app_config(legacy, false, false).unwrap();
         assert!(config.legacy_mode);
@@ -1094,7 +1091,6 @@ mod tests {
             ttl: 120,
             ip4_provider: None,
             ip6_provider: None,
-            record_comment: None,
         };
         let config = legacy_to_app_config(legacy, true, true).unwrap();
         assert!(
@@ -1125,7 +1121,6 @@ mod tests {
             ttl: 300,
             ip4_provider: None,
             ip6_provider: None,
-            record_comment: None,
         };
         let config = legacy_to_app_config(legacy, false, false).unwrap();
         assert!(matches!(config.auth, Auth::Key { ref api_key, ref email }
@@ -1150,7 +1145,6 @@ mod tests {
             ttl: 300,
             ip4_provider: Some("ipify".to_string()),
             ip6_provider: Some("cloudflare.doh".to_string()),
-            record_comment: None,
         };
         let config = legacy_to_app_config(legacy, false, false).unwrap();
         assert!(matches!(config.providers[&IpType::V4], ProviderType::Ipify));
@@ -1178,7 +1172,6 @@ mod tests {
             ttl: 300,
             ip4_provider: Some("none".to_string()),
             ip6_provider: None,
-            record_comment: None,
         };
         let config = legacy_to_app_config(legacy, false, false).unwrap();
         // ip4_provider=none should exclude V4 even though a=true
@@ -1204,36 +1197,11 @@ mod tests {
             ttl: 300,
             ip4_provider: Some("totally_invalid".to_string()),
             ip6_provider: None,
-            record_comment: None,
         };
         let result = legacy_to_app_config(legacy, false, false);
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(err.contains("ip4_provider"));
-    }
-
-    #[test]
-    fn test_legacy_to_app_config_with_record_comment() {
-        let legacy = LegacyConfig {
-            cloudflare: vec![LegacyCloudflareEntry {
-                authentication: LegacyAuthentication {
-                    api_token: "tok".to_string(),
-                    api_key: None,
-                },
-                zone_id: "z".to_string(),
-                subdomains: vec![],
-                proxied: false,
-            }],
-            a: true,
-            aaaa: false,
-            purge_unknown_records: false,
-            ttl: 300,
-            ip4_provider: None,
-            ip6_provider: None,
-            record_comment: Some("managed by cloudflare-ddns".to_string()),
-        };
-        let config = legacy_to_app_config(legacy, false, false).unwrap();
-        assert_eq!(config.record_comment, Some("managed by cloudflare-ddns".to_string()));
     }
 
     #[test]
@@ -1250,20 +1218,6 @@ mod tests {
         let config = parse_legacy_config(json).unwrap();
         assert_eq!(config.ip4_provider, Some("ipify".to_string()));
         assert_eq!(config.ip6_provider, Some("none".to_string()));
-    }
-
-    #[test]
-    fn test_legacy_config_deserializes_record_comment() {
-        let json = r#"{
-            "cloudflare": [{
-                "authentication": { "api_token": "tok" },
-                "zone_id": "z",
-                "subdomains": ["@"]
-            }],
-            "recordComment": "managed by cloudflare-ddns"
-        }"#;
-        let config = parse_legacy_config(json).unwrap();
-        assert_eq!(config.record_comment, Some("managed by cloudflare-ddns".to_string()));
     }
 
     #[test]

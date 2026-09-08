@@ -168,7 +168,7 @@ impl CloudflareHandle {
         managed_comment_regex: Option<regex_lite::Regex>,
         managed_waf_comment_regex: Option<regex_lite::Regex>,
     ) -> Self {
-        let client = Client::builder()
+        let client = crate::client_builder()
             .timeout(update_timeout)
             .build()
             .expect("Failed to build HTTP client");

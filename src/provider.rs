@@ -267,7 +267,7 @@ impl Resolve for FilteredResolver {
 /// resolution results, ensuring the client never attempts a connection
 /// over the wrong protocol.
 pub fn build_split_client(ip_type: IpType, timeout: Duration) -> Client {
-    Client::builder()
+    crate::client_builder()
         .dns_resolver(FilteredResolver { ip_type })
         .timeout(timeout)
         .build()
