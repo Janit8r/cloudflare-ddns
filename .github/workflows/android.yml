@@ -30,16 +30,16 @@ name: Android Build
 #      身 crt 启动对象会直接引用它们，加载期报 "cannot locate symbol XXX"。为每个目标链入垫片
 #      （--whole-archive 强制保留），为空实现/转调（getifaddrs→空列表、__register_atfork→
 #      pthread_atfork、epoll_create1→epoll_create、signal→sigaction）。见 libs/getifaddrs_shim.c。
-#   8) build-std 从源头消除 std 侧的高 API 符号引用：上一条的垫片只兜 NDK crt / std 运行时的
-#      缺符号；更彻底的做法是用 `-Z build-std`（需 nightly 工具链 + rust-src）把 std 按更低的
-#      `android-api` 重编——std 在 android-api<24 时不用 getifaddrs，从而不再引用设备的缺失符号。
-#      android-api 统一设 21：NDK r27 最低只支持 API 21（无 19/20 的 platform，设更低 build-std
-#      会找不到 platform 而失败），且 21 已是 armv7/i686 在 r27 下能触达的最低值。注意 android-api
-#      必须以 .cargo/config.toml 形式写入，不能用 `--config target.x.android-api=21` CLI 传整数值
-#      （Cargo 会报 "expected a table, but found a integer"）。build-std 仍需 nightly。
-#   9) 若仍出现个别 cannot locate symbol "XXX"：先确认是 std 侧还是 NDK crt 侧；若是 std 侧且
-#      build-std 未覆盖，继续下调对应目标 android-api；若是 NDK crt 侧，往 libs/getifaddrs_shim.c
-#      追加该符号的 no-op / 转调实现即可（垫片对所有目标链入，无需改 CI/脚本接线）。
+#   8) build-std 用 nightly 工具链 + rust-src 重编 std（统一 artifact 行为）。原本计划用
+#      target.<triple>.android-api 把 std 降到更低 API 以从源头少引用高 API 符号，但当前 nightly 的
+#      Cargo 把 android-api 解析为 table 而非 integer（config.toml 与 --config 两种写法均报
+#      "expected a table, but found a integer"），无法确定其新语法，故**不设置 android-api**，
+#      build-std 用默认 API 重编 std；而老 bionic 缺失符号（getifaddrs / __register_atfork /
+#      epoll_create1 / signal）已全由 libs/getifaddrs_shim.c 的垫片兜住（链入所有目标），
+#      缺失符号仍由 shim 覆盖，编译/加载不受影响。build-std 仍需 nightly。
+#   9) 若仍出现个别 cannot locate symbol "XXX"：往 libs/getifaddrs_shim.c 追加该符号的 no-op /
+#      转调实现即可（垫片对所有目标链入，无需改 CI/脚本接线）。若确需更低 android-api，再单独
+#      排查该键在所用 nightly 中的正确语法（可能已改为 table 形式）。
 #
 # 运行环境：
 #   默认 runs-on: ubuntu-latest（x86_64 官方托管机），可运行标准 x86_64 NDK 并交叉编译
@@ -156,20 +156,12 @@ jobs:
           "$CC_X86" libs/getifaddrs_shim.c -c -o "$SHIM_X86"
           echo "getifaddrs shims: $SHIM_A $SHIM_V7 $SHIM_X86"
 
-          # 把每个目标的 android-api 写进 .cargo/config.toml（避免 --config CLI 对整数值
-          # 解析报 "expected a table, but found a integer"）。NDK r27 最低支持 API 21，故三个
-          # 目标统一设 21；build-std 据此用 API 21 重编 std，避免引用更高的 API 符号。
-          mkdir -p .cargo
-          echo '[target.aarch64-linux-android]' > .cargo/config.toml
-          echo 'android-api = 21' >> .cargo/config.toml
-          echo '' >> .cargo/config.toml
-          echo '[target.armv7-linux-androideabi]' >> .cargo/config.toml
-          echo 'android-api = 21' >> .cargo/config.toml
-          echo '' >> .cargo/config.toml
-          echo '[target.i686-linux-android]' >> .cargo/config.toml
-          echo 'android-api = 21' >> .cargo/config.toml
-          echo "--- .cargo/config.toml ---"
-          cat .cargo/config.toml
+          # 注意: 不再设置 target.<triple>.android-api。当前 nightly 的 Cargo 把该键解析为
+          # table 而非 integer（config.toml 与 --config 两种写法都报
+          # "expected a table, but found a integer"），且无法可靠确定其新语法。而 cloudflare-ddns
+          # 所需的老 bionic 缺失符号（getifaddrs / __register_atfork / epoll_create1 / signal）
+          # 已由 libs/getifaddrs_shim.c 全部兜住（链入所有目标），build-std 在此用默认 API 重编
+          # std 即可，缺失符号仍由 shim 覆盖。若后续确需更低 android-api，再单独排查该键语法。
 
           mkdir -p out
           env \
