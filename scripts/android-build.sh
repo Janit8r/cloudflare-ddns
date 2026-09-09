@@ -131,7 +131,7 @@ for t in "${TARGET_ARGS[@]}"; do
     *) continue;;
   esac
   "$cc" libs/getifaddrs_shim.c -c -o "$obj"
-  ENV_ARGS+=( "CARGO_TARGET_$(triple_to_env "$t")_RUSTFLAGS=-Clink-arg=-Wl,--whole-archive -Clink-arg=$obj -Clink-arg=-Wl,--no-whole-archive" )
+  ENV_ARGS+=( "CARGO_TARGET_$(triple_to_env "$t")_RUSTFLAGS=-Clink-arg=-Wl,--hash-style=both -Clink-arg=-Wl,--whole-archive -Clink-arg=$obj -Clink-arg=-Wl,--no-whole-archive" )
   echo "==> getifaddrs 垫片: $obj"
 done
 
