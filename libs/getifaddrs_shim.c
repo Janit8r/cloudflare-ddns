@@ -15,6 +15,16 @@
  *                                 bionic only exports pthread_atfork (public),
  *                                 keeping __register_atfork hidden; NDK r27 std
  *                                 references the hidden one directly.
+ *   - epoll_create1             : same old bionic (Android < 5.0 / API < 21)
+ *                                 only exports epoll_create(int); NDK r27 std
+ *                                 references epoll_create1.
+ *   - signal                    : old bionic defines signal as a macro
+ *                                 (bsd_signal/sigset); NDK crt / std reference
+ *                                 a real `signal` function symbol that's hidden.
+ *   - dl_iterate_phdr           : Hi3798MV310 again. Added in bionic at API 21;
+ *                                 referenced by Rust's unwinder / backtrace
+ *                                 capture (std::backtrace, anyhow Backtrace).
+ *                                 Old bionic doesn't export it.
  *
  * Notes:
  *   - cloudflare-ddns resolves its public IP via external providers, so a no-op
@@ -113,5 +123,28 @@ shim_sighandler_t USED signal(int signum, shim_sighandler_t handler) {
         return (shim_sighandler_t)SIG_ERR;
     }
     return old.sa_handler;
+}
+
+/* dl_iterate_phdr shim for old bionic (Android < 5.0 / API < 21).
+ *
+ * Why: dl_iterate_phdr was added to bionic at API 21. Rust's unwinder and
+ * backtrace capture (std::backtrace / anyhow's Backtrace) reference it as a hard
+ * symbol, so on older firmwares load fails with:
+ *   CANNOT LINK EXECUTABLE: cannot locate symbol "dl_iterate_phdr"
+ *
+ * Fix: provide a no-op that reports ZERO modules (calls the callback zero times
+ * and returns 0, the count of modules visited). cloudflare-ddns's actual
+ * functionality (resolving public IP, updating DNS records) never depends on
+ * dl_iterate_phdr; it's only used to build panic/error backtraces, which are
+ * purely diagnostic. Returning an empty module list just yields empty
+ * backtraces on these old devices — harmless for a production daemon. On devices
+ * that DO export the real dl_iterate_phdr, our definition shadows it but is
+ * behaviorally a strict subset (no backtrace info), which does not affect
+ * runtime behavior. */
+int USED dl_iterate_phdr(int (*callback)(struct dl_phdr_info *, size_t, void *),
+                         void *data) {
+    (void)callback;
+    (void)data;
+    return 0; /* visited 0 modules */
 }
 
