@@ -25,6 +25,24 @@
  *                                 referenced by Rust's unwinder / backtrace
  *                                 capture (std::backtrace, anyhow Backtrace).
  *                                 Old bionic doesn't export it.
+ *   - sigemptyset / sigfillset  : Hi3798MV310 (armv7a, kernel 3.10) — the
+ *                                 device's bionic doesn't export these sigset
+ *                                 ops as real function symbols (they're inline/
+ *                                 macro in newer NDK headers, but std / crt emit
+ *                                 a call), so load fails with "cannot locate
+ *                                 symbol sigemptyset". Implemented via memset
+ *                                 (layout-independent, correct empty/full sets).
+ *   - getrandom                : Hi3798MV310 (armv7a, kernel 3.10). Old bionic
+ *                                 doesn't export getrandom, and the getrandom()
+ *                                 syscall only exists on kernel >= 3.17 — this
+ *                                 box runs 3.10, so a raw syscall would fail
+ *                                 ENOSYS. Implemented by reading /dev/urandom,
+ *                                 which is always available and never blocks.
+ *   - dl_unwind_find_exidx     : 32-bit ARM unwinder symbol referenced by
+ *                                 libgcc's unwind-dw2; old bionic doesn't export
+ *                                 it. Provided as a best-effort stub returning
+ *                                 no unwind table (panics abort instead of
+ *                                 unwinding — acceptable for a daemon).
  *
  * Notes:
  *   - cloudflare-ddns resolves its public IP via external providers, so a no-op
@@ -45,6 +63,9 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
 
 /* Keep the symbols even if the linker's --gc-sections thinks they're unused. */
 #define USED __attribute__((used, visibility("default")))
@@ -146,5 +167,91 @@ int USED dl_iterate_phdr(int (*callback)(struct dl_phdr_info *, size_t, void *),
     (void)callback;
     (void)data;
     return 0; /* visited 0 modules */
+}
+
+/* sigemptyset / sigfillset shim for old bionic.
+ *
+ * Why: reported on Hi3798MV310 (armv7a, kernel 3.10). The device's bionic
+ * doesn't export these as real `sigemptyset` / `sigfillset` function symbols —
+ * in newer NDK headers they're inline/macro, yet std and the crt still emit a
+ * call, so load fails with:
+ *   CANNOT LINK EXECUTABLE: cannot locate symbol "sigemptyset"
+ * (and typically "sigfillset" too, same family).
+ *
+ * Fix: provide genuine functions implemented with memset. Semantics are simple
+ * and layout-independent:
+ *   - empty set  = all-zero bits  (no signal blocked)
+ *   - full set   = all-ones bits  (every signal blocked)
+ * which is correct for every bionic sigset_t layout. On devices whose bionic
+ * DOES export the real sigemptyset/sigfillset, our definition is behaviorally
+ * equivalent (and shadows it, as with the other shims in this file). */
+int USED sigemptyset(sigset_t *set) {
+    if (set) {
+        memset(set, 0, sizeof(*set));
+    }
+    return 0;
+}
+
+int USED sigfillset(sigset_t *set) {
+    if (set) {
+        memset(set, 0xff, sizeof(*set));
+    }
+    return 0;
+}
+
+/* getrandom shim for old bionic (kernel < 3.17 / API < 26).
+ *
+ * Why: Rust's getrandom crate (and libc::getrandom) bind to the libc function,
+ * which old bionic doesn't export. The getrandom() syscall itself only exists
+ * on kernel >= 3.17, but this device runs kernel 3.10, so even a raw syscall
+ * would return ENOSYS. We fall back to reading /dev/urandom, which is always
+ * present and never blocks — exactly what callers want (e.g. TLS / DoH
+ * randomness). flags (GRND_NONBLOCK / GRND_RANDOM) are ignored because
+ * /dev/urandom semantics match our needs regardless. */
+ssize_t USED getrandom(void *buf, size_t buflen, unsigned int flags) {
+    (void)flags;
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    char *p = (char *)buf;
+    size_t remaining = buflen;
+    while (remaining > 0) {
+        ssize_t n = read(fd, p, remaining);
+        if (n > 0) {
+            p += n;
+            remaining -= (size_t)n;
+        } else if (n == 0) {
+            break; /* shouldn't happen on /dev/urandom */
+        } else {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(fd);
+            return -1;
+        }
+    }
+    close(fd);
+    return (ssize_t)(buflen - remaining);
+}
+
+/* dl_unwind_find_exidx shim for old bionic (32-bit ARM, kernel 3.10).
+ *
+ * Why: the ARM C++/Rust unwinder (libgcc unwind-dw2) references
+ * dl_unwind_find_exidx to locate a module's EXIDX unwind table. This old
+ * bionic doesn't export it, so load fails with:
+ *   CANNOT LINK EXECUTABLE: cannot locate symbol "dl_unwind_find_exidx"
+ *
+ * Fix: provide a best-effort stub that reports no unwind table for any PC.
+ * Consequence: C++ exceptions / Rust panics on ARM won't unwind through the
+ * main executable (they abort), which is acceptable for a production daemon
+ * whose normal code path never throws. On devices whose bionic DOES export the
+ * real symbol, our definition shadows it but only degrades backtraces. */
+void *USED dl_unwind_find_exidx(void *pc, int *pcount) {
+    (void)pc;
+    if (pcount) {
+        *pcount = 0;
+    }
+    return 0;
 }
 
