@@ -124,7 +124,9 @@ ENV_ARGS=(
 # 以及 AOW-PC x86）bionic 缺 getifaddrs（即便 Rust 预编译 std::net 把它当硬符号引用），
 # 动态链接器加载时即报 "cannot locate symbol getifaddrs"。为每个目标编译 no-op 垫片
 # （空接口列表）并链入，使二进制不依赖设备 bionic 的该符号。DDNS 用外部服务查公网 IP，
-# 不枚举本地网卡，返回空列表无害。
+# 不枚举本地网卡，返回空列表无害。同理覆盖 __register_atfork / epoll_create1 / signal /
+# dl_iterate_phdr（后者为老 bionic<API21 缺失符号，由 unwinder/backtrace 引用，垫片返回
+# 0 个模块即可，不影响 DDNS 功能）。
 triple_to_env() { echo "$1" | tr '[:lower:]' '[:upper:]' | tr '.-' '__'; }
 for t in "${TARGET_ARGS[@]}"; do
   case "$t" in
