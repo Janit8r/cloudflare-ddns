@@ -25,9 +25,20 @@ name: Android Build
 #      默认只生成 .gnu.hash（--hash-style=gnu），加载时直接报
 #      "empty/missing DT_HASH in ... (built with --hash-style=gnu?)"。修复：链接参数加
 #      -Wl,--hash-style=both（同时生成 .hash 与 .gnu.hash），新老 linker 都兼容。
-#   7) getifaddrs 垫片：老 bionic 缺 getifaddrs 符号（API 24 才引入），Rust std::net 把它当
-#      硬符号引用，加载期报 "cannot locate symbol getifaddrs"。为每个目标链入 no-op 垫片
-#      （--whole-archive 强制保留）。见 libs/getifaddrs_shim.c。
+#   7) getifaddrs / __register_atfork / epoll_create1 / signal 垫片：老 bionic（内核 3.10.x /
+#      Android < 5.0，API 普遍 < 21）隐藏或缺失这些符号，而 NDK r27 预编译的 Rust std 与 NDK 自
+#      身 crt 启动对象会直接引用它们，加载期报 "cannot locate symbol XXX"。为每个目标链入垫片
+#      （--whole-archive 强制保留），为空实现/转调（getifaddrs→空列表、__register_atfork→
+#      pthread_atfork、epoll_create1→epoll_create、signal→sigaction）。见 libs/getifaddrs_shim.c。
+#   8) build-std 从源头消除 std 侧的高 API 符号引用：上一条的垫片只兜 NDK crt / std 运行时的
+#      缺符号；更彻底的做法是用 `-Z build-std`（需 nightly 工具链 + rust-src）把 std 按更低的
+#      `android-api` 重编——std 在 android-api<21 时改用 epoll_create / 旧接口，<24 时不用
+#      getifaddrs，从而不再引用设备的缺失符号。各目标 android-api：aarch64 下限 21、armv7/i686
+#      设 19（兼顾 std 支持范围与老固件兼容）。注意：build-std 仍需 nightly；若 NDK r27 链接期因
+#      旧符号被移除而报错，需把 NDK 降到 r23b（min API 19）/ r21e（min API 16）以链接旧 platform。
+#   9) 若仍出现个别 cannot locate symbol "XXX"：先确认是 std 侧还是 NDK crt 侧；若是 std 侧且
+#      build-std 未覆盖，继续下调对应目标 android-api；若是 NDK crt 侧，往 libs/getifaddrs_shim.c
+#      追加该符号的 no-op / 转调实现即可（垫片对所有目标链入，无需改 CI/脚本接线）。
 #
 # 运行环境：
 #   默认 runs-on: ubuntu-latest（x86_64 官方托管机），可运行标准 x86_64 NDK 并交叉编译
@@ -72,10 +83,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Rust toolchain (with Android targets)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust toolchain (nightly + rust-src for build-std)
+        uses: dtolnay/rust-toolchain@nightly
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android
+          components: rust-src
 
       - name: Cache Android NDK
         id: ndk
@@ -164,7 +176,10 @@ jobs:
             CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=-Wl,--hash-style=both -Clink-arg=-Wl,--whole-archive -Clink-arg=$SHIM_A -Clink-arg=-Wl,--no-whole-archive" \
             CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS="-Clink-arg=-Wl,--hash-style=both -Clink-arg=-Wl,--whole-archive -Clink-arg=$SHIM_V7 -Clink-arg=-Wl,--no-whole-archive" \
             CARGO_TARGET_I686_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=-Wl,--hash-style=both -Clink-arg=-Wl,--whole-archive -Clink-arg=$SHIM_X86 -Clink-arg=-Wl,--no-whole-archive" \
-            cargo build \
+            cargo +nightly build -Z build-std \
+              --config 'target.aarch64-linux-android.android-api=21' \
+              --config 'target.armv7-linux-androideabi.android-api=19' \
+              --config 'target.i686-linux-android.android-api=19' \
               --target aarch64-linux-android \
               --target armv7-linux-androideabi \
               --target i686-linux-android \
