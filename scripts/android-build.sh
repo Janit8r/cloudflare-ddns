@@ -21,6 +21,9 @@
 #   x86         -> i686-linux-android           (32 位 x86；NDK r27 仍支持该 ABI)
 #
 # 依赖: curl, unzip, rustup (已添加 aarch64-linux-android / armv7-linux-androideabi / i686-linux-android)
+#       以及 nightly 工具链 + rust-src 组件（build-std 必需）：
+#         rustup toolchain install nightly
+#         rustup component add rust-src --toolchain nightly
 # =============================================================================
 set -euo pipefail
 
@@ -135,8 +138,23 @@ for t in "${TARGET_ARGS[@]}"; do
   echo "==> getifaddrs 垫片: $obj"
 done
 
+# build-std：用 nightly 把 std 按更低 android-api 重编，使 std 不再引用老 bionic 缺失的
+# 高 API 符号（epoll_create1/getifaddrs 等）。各目标 android-api：aarch64 下限 21、
+# armv7/i686 设 19。需要本机已装 nightly 且 `rustup component add rust-src --toolchain nightly`。
+# 垫片(--whole-archive 链入) 仍保留，兜底 NDK crt 启动对象引用的 __register_atfork/signal 等。
+CONFIG_ARGS=()
+for t in "${TARGET_ARGS[@]}"; do
+  case "$t" in
+    aarch64-linux-android)      api=21;;
+    armv7-linux-androideabi)    api=19;;
+    i686-linux-android)         api=19;;
+    *)                          api=21;;
+  esac
+  CONFIG_ARGS+=( --config "target.$t.android-api=$api" )
+done
+
 env "${ENV_ARGS[@]}" \
-  cargo build --release $(printf -- '--target %s ' "${TARGET_ARGS[@]}")
+  cargo +nightly build -Z build-std "${CONFIG_ARGS[@]}" --release $(printf -- '--target %s ' "${TARGET_ARGS[@]}")
 
 mkdir -p out
 for target in "${TARGET_ARGS[@]}"; do
