@@ -28,7 +28,7 @@
 set -euo pipefail
 
 NDK_VERSION="${NDK_VERSION:-r27c}"
-ANDROID_API="${ANDROID_API:-24}"
+ANDROID_API="${ANDROID_API:-21}"
 
 # 根据宿主机选择 NDK 预编译包 (官方仅提供 x86_64 / aarch64 宿主包)
 HOST="$(uname -s)"
@@ -138,23 +138,27 @@ for t in "${TARGET_ARGS[@]}"; do
   echo "==> getifaddrs 垫片: $obj"
 done
 
-# build-std：用 nightly 把 std 按更低 android-api 重编，使 std 不再引用老 bionic 缺失的
-# 高 API 符号（epoll_create1/getifaddrs 等）。各目标 android-api：aarch64 下限 21、
-# armv7/i686 设 19。需要本机已装 nightly 且 `rustup component add rust-src --toolchain nightly`。
-# 垫片(--whole-archive 链入) 仍保留，兜底 NDK crt 启动对象引用的 __register_atfork/signal 等。
-CONFIG_ARGS=()
+# build-std：用 nightly 把 std 按更低的 android-api 重编，使 std 不再引用老 bionic 缺失的
+# 高 API 符号。NDK r27 最低支持 API 21（armv7/i686 不可设更低，否则 build-std 找不到对应
+# platform），故统一设 21。垫片(--whole-archive 链入) 仍保留，兜底 NDK crt 的
+# __register_atfork/signal 等符号。
+# 注意：android-api 写入 .cargo/config.toml（用 --config CLI 传整数值会被解析报
+# "expected a table, but found a integer"，故改用配置文件）。该文件仅含 [target.<triple>]
+# 段落，不影响宿主机构建，可保留或删除。
+mkdir -p .cargo
+: > .cargo/config.toml
 for t in "${TARGET_ARGS[@]}"; do
-  case "$t" in
-    aarch64-linux-android)      api=21;;
-    armv7-linux-androideabi)    api=19;;
-    i686-linux-android)         api=19;;
-    *)                          api=21;;
-  esac
-  CONFIG_ARGS+=( --config "target.$t.android-api=$api" )
+  {
+    echo "[target.$t]"
+    echo "android-api = 21"
+    echo ""
+  } >> .cargo/config.toml
 done
+echo "==> .cargo/config.toml:"
+cat .cargo/config.toml
 
 env "${ENV_ARGS[@]}" \
-  cargo +nightly build -Z build-std "${CONFIG_ARGS[@]}" --release $(printf -- '--target %s ' "${TARGET_ARGS[@]}")
+  cargo +nightly build -Z build-std --release $(printf -- '--target %s ' "${TARGET_ARGS[@]}")
 
 mkdir -p out
 for target in "${TARGET_ARGS[@]}"; do
