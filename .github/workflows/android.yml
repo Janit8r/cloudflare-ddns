@@ -160,16 +160,14 @@ jobs:
           # 解析报 "expected a table, but found a integer"）。NDK r27 最低支持 API 21，故三个
           # 目标统一设 21；build-std 据此用 API 21 重编 std，避免引用更高的 API 符号。
           mkdir -p .cargo
-          cat > .cargo/config.toml <<'TOML'
-[target.aarch64-linux-android]
-android-api = 21
-
-[target.armv7-linux-androideabi]
-android-api = 21
-
-[target.i686-linux-android]
-android-api = 21
-TOML
+          echo '[target.aarch64-linux-android]' > .cargo/config.toml
+          echo 'android-api = 21' >> .cargo/config.toml
+          echo '' >> .cargo/config.toml
+          echo '[target.armv7-linux-androideabi]' >> .cargo/config.toml
+          echo 'android-api = 21' >> .cargo/config.toml
+          echo '' >> .cargo/config.toml
+          echo '[target.i686-linux-android]' >> .cargo/config.toml
+          echo 'android-api = 21' >> .cargo/config.toml
           echo "--- .cargo/config.toml ---"
           cat .cargo/config.toml
 
