@@ -32,10 +32,11 @@ name: Android Build
 #      pthread_atfork、epoll_create1→epoll_create、signal→sigaction）。见 libs/getifaddrs_shim.c。
 #   8) build-std 从源头消除 std 侧的高 API 符号引用：上一条的垫片只兜 NDK crt / std 运行时的
 #      缺符号；更彻底的做法是用 `-Z build-std`（需 nightly 工具链 + rust-src）把 std 按更低的
-#      `android-api` 重编——std 在 android-api<21 时改用 epoll_create / 旧接口，<24 时不用
-#      getifaddrs，从而不再引用设备的缺失符号。各目标 android-api：aarch64 下限 21、armv7/i686
-#      设 19（兼顾 std 支持范围与老固件兼容）。注意：build-std 仍需 nightly；若 NDK r27 链接期因
-#      旧符号被移除而报错，需把 NDK 降到 r23b（min API 19）/ r21e（min API 16）以链接旧 platform。
+#      `android-api` 重编——std 在 android-api<24 时不用 getifaddrs，从而不再引用设备的缺失符号。
+#      android-api 统一设 21：NDK r27 最低只支持 API 21（无 19/20 的 platform，设更低 build-std
+#      会找不到 platform 而失败），且 21 已是 armv7/i686 在 r27 下能触达的最低值。注意 android-api
+#      必须以 .cargo/config.toml 形式写入，不能用 `--config target.x.android-api=21` CLI 传整数值
+#      （Cargo 会报 "expected a table, but found a integer"）。build-std 仍需 nightly。
 #   9) 若仍出现个别 cannot locate symbol "XXX"：先确认是 std 侧还是 NDK crt 侧；若是 std 侧且
 #      build-std 未覆盖，继续下调对应目标 android-api；若是 NDK crt 侧，往 libs/getifaddrs_shim.c
 #      追加该符号的 no-op / 转调实现即可（垫片对所有目标链入，无需改 CI/脚本接线）。
@@ -54,8 +55,10 @@ name: Android Build
 #   - i686-linux-android      → x86           （32 位 x86；NDK r27 仍支持该 ABI，ring 0.17
 #                                               的 Android 平台支持含 OPENSSL_X86，可编译）
 #   注: 你给的内核信息用于判断目标设备架构。i686 设备（内核 3.10.0 的老机器）对应 x86；
-#       NDK r25+ 最低 API 为 21，若设备系统低于 Android 5.0(API 21)，API 24 产物可能
-#       因缺少 bionic 符号而无法运行，遇此情况需下调 ANDROID_API 或换旧版 NDK。
+#       NDK r25+ 最低 API 为 21，故 ANDROID_API 固定为 21，build-std 的 android-api 也取 21，
+#       与 NDK clang 包装脚本（aarch64-linux-android21-clang 等）保持一致。若设备系统低于
+#       Android 5.0(API 21) 仍报缺符号，需把 NDK 降到 r23b(min API 19)/r21e(min API 16) 才能
+#       链接更旧的 platform。
 # -------------------------------------------------------------------------------
 
 on:
@@ -73,7 +76,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   NDK_VERSION: r27c
-  ANDROID_API: "24"
+  ANDROID_API: "21"
 
 jobs:
   android:
@@ -153,6 +156,23 @@ jobs:
           "$CC_X86" libs/getifaddrs_shim.c -c -o "$SHIM_X86"
           echo "getifaddrs shims: $SHIM_A $SHIM_V7 $SHIM_X86"
 
+          # 把每个目标的 android-api 写进 .cargo/config.toml（避免 --config CLI 对整数值
+          # 解析报 "expected a table, but found a integer"）。NDK r27 最低支持 API 21，故三个
+          # 目标统一设 21；build-std 据此用 API 21 重编 std，避免引用更高的 API 符号。
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'TOML'
+[target.aarch64-linux-android]
+android-api = 21
+
+[target.armv7-linux-androideabi]
+android-api = 21
+
+[target.i686-linux-android]
+android-api = 21
+TOML
+          echo "--- .cargo/config.toml ---"
+          cat .cargo/config.toml
+
           mkdir -p out
           env \
             CC_aarch64-linux-android="$CC_A" \
@@ -177,9 +197,6 @@ jobs:
             CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS="-Clink-arg=-Wl,--hash-style=both -Clink-arg=-Wl,--whole-archive -Clink-arg=$SHIM_V7 -Clink-arg=-Wl,--no-whole-archive" \
             CARGO_TARGET_I686_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=-Wl,--hash-style=both -Clink-arg=-Wl,--whole-archive -Clink-arg=$SHIM_X86 -Clink-arg=-Wl,--no-whole-archive" \
             cargo +nightly build -Z build-std \
-              --config 'target.aarch64-linux-android.android-api=21' \
-              --config 'target.armv7-linux-androideabi.android-api=19' \
-              --config 'target.i686-linux-android.android-api=19' \
               --target aarch64-linux-android \
               --target armv7-linux-androideabi \
               --target i686-linux-android \
