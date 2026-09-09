@@ -20,6 +20,14 @@ name: Android Build
 #      env 或 GitHub 的 $GITHUB_ENV，二者都走 OS 级 setenv）。变量名用 Rust target triple
 #      （armv7-linux-androideabi），值指向 NDK 包装脚本（armv7a-linux-androideabi<api>-clang），
 #      差异在此对齐。最后由我们手动拷贝产物。
+#   6) 老固件 linker 兼容：部分老 Android box（如 Hi3798MV310 / mangosteen，内核 3.10.x）
+#      用的是老版本 /system/bin/linker，只认传统的 DT_HASH（.hash 段），而现代 NDK/LLVM
+#      默认只生成 .gnu.hash（--hash-style=gnu），加载时直接报
+#      "empty/missing DT_HASH in ... (built with --hash-style=gnu?)"。修复：链接参数加
+#      -Wl,--hash-style=both（同时生成 .hash 与 .gnu.hash），新老 linker 都兼容。
+#   7) getifaddrs 垫片：老 bionic 缺 getifaddrs 符号（API 24 才引入），Rust std::net 把它当
+#      硬符号引用，加载期报 "cannot locate symbol getifaddrs"。为每个目标链入 no-op 垫片
+#      （--whole-archive 强制保留）。见 libs/getifaddrs_shim.c。
 #
 # 运行环境：
 #   默认 runs-on: ubuntu-latest（x86_64 官方托管机），可运行标准 x86_64 NDK 并交叉编译
@@ -153,9 +161,9 @@ jobs:
             RANLIB_i686-linux-android="$NDK_BIN/llvm-ranlib" \
             CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$CC_X86" \
             CARGO_TARGET_I686_LINUX_ANDROID_AR="$NDK_BIN/llvm-ar" \
-            CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=-Wl,--whole-archive -Clink-arg=$SHIM_A -Clink-arg=-Wl,--no-whole-archive" \
-            CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS="-Clink-arg=-Wl,--whole-archive -Clink-arg=$SHIM_V7 -Clink-arg=-Wl,--no-whole-archive" \
-            CARGO_TARGET_I686_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=-Wl,--whole-archive -Clink-arg=$SHIM_X86 -Clink-arg=-Wl,--no-whole-archive" \
+            CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=-Wl,--hash-style=both -Clink-arg=-Wl,--whole-archive -Clink-arg=$SHIM_A -Clink-arg=-Wl,--no-whole-archive" \
+            CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS="-Clink-arg=-Wl,--hash-style=both -Clink-arg=-Wl,--whole-archive -Clink-arg=$SHIM_V7 -Clink-arg=-Wl,--no-whole-archive" \
+            CARGO_TARGET_I686_LINUX_ANDROID_RUSTFLAGS="-Clink-arg=-Wl,--hash-style=both -Clink-arg=-Wl,--whole-archive -Clink-arg=$SHIM_X86 -Clink-arg=-Wl,--no-whole-archive" \
             cargo build \
               --target aarch64-linux-android \
               --target armv7-linux-androideabi \
