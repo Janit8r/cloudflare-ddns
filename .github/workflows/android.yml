@@ -25,11 +25,12 @@ name: Android Build
 #      默认只生成 .gnu.hash（--hash-style=gnu），加载时直接报
 #      "empty/missing DT_HASH in ... (built with --hash-style=gnu?)"。修复：链接参数加
 #      -Wl,--hash-style=both（同时生成 .hash 与 .gnu.hash），新老 linker 都兼容。
-#   7) getifaddrs / __register_atfork / epoll_create1 / signal 垫片：老 bionic（内核 3.10.x /
-#      Android < 5.0，API 普遍 < 21）隐藏或缺失这些符号，而 NDK r27 预编译的 Rust std 与 NDK 自
-#      身 crt 启动对象会直接引用它们，加载期报 "cannot locate symbol XXX"。为每个目标链入垫片
-#      （--whole-archive 强制保留），为空实现/转调（getifaddrs→空列表、__register_atfork→
-#      pthread_atfork、epoll_create1→epoll_create、signal→sigaction）。见 libs/getifaddrs_shim.c。
+#   7) getifaddrs / __register_atfork / epoll_create1 / signal / dl_iterate_phdr 垫片：老
+#      bionic（内核 3.10.x / Android < 5.0，API 普遍 < 21）隐藏或缺失这些符号，而 NDK r27 预编译的
+#      Rust std 与 NDK 自身 crt 启动对象会直接引用它们，加载期报 "cannot locate symbol XXX"。为每
+#      个目标链入垫片（--whole-archive 强制保留），实现为空实现/转调（getifaddrs→空列表、
+#      __register_atfork→pthread_atfork、epoll_create1→epoll_create、signal→sigaction、
+#      dl_iterate_phdr→返回 0 个模块）。见 libs/getifaddrs_shim.c。
 #   8) build-std 用 nightly 工具链 + rust-src 重编 std（统一 artifact 行为）。原本计划用
 #      target.<triple>.android-api 把 std 降到更低 API 以从源头少引用高 API 符号，但当前 nightly 的
 #      Cargo 把 android-api 解析为 table 而非 integer（config.toml 与 --config 两种写法均报
