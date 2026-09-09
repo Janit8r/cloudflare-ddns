@@ -34,6 +34,7 @@
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
+#include <signal.h>
 
 /* Keep the symbols even if the linker's --gc-sections thinks they're unused. */
 #define USED __attribute__((used, visibility("default")))
@@ -89,3 +90,28 @@ int USED epoll_create1(int flags) {
     }
     return fd;
 }
+
+/* signal shim for old bionic.
+ *
+ * Why: on some old firmwares bionic either lacks a real `signal` function symbol
+ * (historically it was a macro expanding to bsd_signal / sigset) or NDK crt / std
+ * references `signal` directly, so load fails with:
+ *   CANNOT LINK EXECUTABLE: cannot locate symbol "signal"
+ *
+ * Fix: provide a genuine `signal` implemented on top of sigaction, which exists
+ * on every Android version. We #undef signal first because <signal.h> on old
+ * bionic may define it as a macro; our definition must be a true function
+ * symbol that the dynamic linker can resolve. */
+#undef signal
+typedef void (*shim_sighandler_t)(int);
+shim_sighandler_t USED signal(int signum, shim_sighandler_t handler) {
+    struct sigaction act, old;
+    act.sa_handler = handler;
+    sigemptyset(&act.sa_mask);
+    act.sa_flags = 0;
+    if (sigaction(signum, &act, &old) != 0) {
+        return (shim_sighandler_t)SIG_ERR;
+    }
+    return old.sa_handler;
+}
+
