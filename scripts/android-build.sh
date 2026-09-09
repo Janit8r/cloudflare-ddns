@@ -138,24 +138,12 @@ for t in "${TARGET_ARGS[@]}"; do
   echo "==> getifaddrs 垫片: $obj"
 done
 
-# build-std：用 nightly 把 std 按更低的 android-api 重编，使 std 不再引用老 bionic 缺失的
-# 高 API 符号。NDK r27 最低支持 API 21（armv7/i686 不可设更低，否则 build-std 找不到对应
-# platform），故统一设 21。垫片(--whole-archive 链入) 仍保留，兜底 NDK crt 的
-# __register_atfork/signal 等符号。
-# 注意：android-api 写入 .cargo/config.toml（用 --config CLI 传整数值会被解析报
-# "expected a table, but found a integer"，故改用配置文件）。该文件仅含 [target.<triple>]
-# 段落，不影响宿主机构建，可保留或删除。
-mkdir -p .cargo
-: > .cargo/config.toml
-for t in "${TARGET_ARGS[@]}"; do
-  {
-    echo "[target.$t]"
-    echo "android-api = 21"
-    echo ""
-  } >> .cargo/config.toml
-done
-echo "==> .cargo/config.toml:"
-cat .cargo/config.toml
+# build-std：用 nightly 把 std 重编（统一 artifact 行为）。原本计划用 android-api 把 std 降到
+# 更低 API 以少引用高 API 符号，但当前 nightly 的 Cargo 把 android-api 解析为 table 而非 integer
+# （config.toml 与 --config 两种写法都报 "expected a table, but found a integer"），不确定其新语法，
+# 故**不设置 android-api**，build-std 用默认 API 重编即可。老 bionic 缺失符号
+# （getifaddrs / __register_atfork / epoll_create1 / signal）已全由垫片(__whole-archive 链入) 兜住，
+# std 引用的缺失符号仍由 shim 覆盖，加载不受影响。
 
 env "${ENV_ARGS[@]}" \
   cargo +nightly build -Z build-std --release $(printf -- '--target %s ' "${TARGET_ARGS[@]}")
