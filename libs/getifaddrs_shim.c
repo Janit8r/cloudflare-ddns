@@ -32,6 +32,8 @@
 #include <ifaddrs.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <sys/epoll.h>
+#include <fcntl.h>
 
 /* Keep the symbols even if the linker's --gc-sections thinks they're unused. */
 #define USED __attribute__((used, visibility("default")))
@@ -64,4 +66,26 @@ int USED __register_atfork(void (*prepare)(void),
     (void)dso_handle;
     int r = pthread_atfork(prepare, parent, child);
     return r == 0 ? 0 : -1;
+}
+
+/* epoll_create1 shim for old bionic (Android < 5.0 / API < 21).
+ *
+ * Why: NDK r27's prebuilt Rust std references epoll_create1 directly, but old
+ * bionic only exports the older epoll_create(int size) and doesn't export
+ * epoll_create1, so load fails with:
+ *   CANNOT LINK EXECUTABLE: cannot locate symbol "epoll_create1"
+ *
+ * Fix: delegate to epoll_create (size argument is ignored by the kernel since
+ * 2.6.x). If EPOLL_CLOEXEC is requested, set FD_CLOEXEC via fcntl so behavior
+ * matches the real epoll_create1. For devices that DO export the real
+ * epoll_create1, our definition shadows it but is behaviorally equivalent. */
+int USED epoll_create1(int flags) {
+    int fd = epoll_create(1);
+    if (fd >= 0 && (flags & EPOLL_CLOEXEC)) {
+        int fl = fcntl(fd, F_GETFD, 0);
+        if (fl >= 0) {
+            fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+        }
+    }
+    return fd;
 }
